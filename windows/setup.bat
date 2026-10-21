@@ -1,7 +1,9 @@
 @echo off
 rem One-time setup shared by start-web.bat and convert.bat:
-rem installs uv (which brings Python and all libraries) and asks for the Gemini key.
+rem finds or installs uv (which brings Python and all libraries) and asks for the Gemini key.
 set PYTHONUTF8=1
+rem Prefer a uv.exe shipped next to this script (no installer, nothing for antivirus to block).
+if exist "%~dp0uv.exe" set "PATH=%~dp0;%PATH%"
 
 where uv >nul 2>nul
 if not errorlevel 1 goto have_uv

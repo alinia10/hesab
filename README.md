@@ -17,7 +17,9 @@ One shot: scanned monthly attendance PDF (فرم حضور و غیاب کارکن
 
 1. Get the project folder onto the PC: on GitHub, **Code → Download ZIP**, then unzip it (for example to `C:\hesab`).
 2. Double-click **`start-web.bat`**.
-   - The first time, it installs `uv` and asks for your Gemini API key (paste it and press Enter).
+   - The first time, it asks for your Gemini API key (paste it and press Enter). It uses `windows\uv.exe` if you
+     put one there (from the [uv releases](https://github.com/astral-sh/uv/releases), file
+     `uv-x86_64-pc-windows-msvc.zip`); otherwise it installs `uv` from the internet.
      It then downloads Python and the libraries, which takes a few minutes, only once.
    - The page opens in the browser at http://localhost:8501. Keep the black window open while you use it,
      and close it when you're done.
