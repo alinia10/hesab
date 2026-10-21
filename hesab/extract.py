@@ -4,6 +4,7 @@ import os
 import time
 from collections.abc import Callable
 
+import numpy as np
 import pymupdf
 from google import genai
 from google.genai import types
@@ -22,6 +23,9 @@ class Row(BaseModel):
     mission_from: str | None = Field(None, description="ساعت ماموریت 'از' value")
     mission_to: str | None = Field(None, description="ساعت ماموریت 'تا' value")
     remote: str | None = Field(None, description="ساعت دورکاری cell as written (number or text)")
+    written_total: str | None = Field(
+        None, description="جمع کارکرد روزانه exactly as handwritten (used only to cross-check, not trusted)"
+    )
     note: str | None = Field(None, description="Anything unusual about this row, in Persian or English")
     uncertain_fields: list[str] = Field(
         default_factory=list,
@@ -49,17 +53,60 @@ Transcribe it into the JSON schema. Rules:
 - In the ماموریت column, put the handwritten 'از' time in mission_from and the 'تا' time in mission_to.
 - In ساعت دورکاری put hours as written (e.g. '2', '1:30'). If it contains a word (e.g. 'ماموریت')
   or ditto marks (//) instead of a number, put that text in remote as-is.
-- IGNORE the جمع کارکرد روزانه column and any monthly total written outside the table; do not compute anything.
+- Copy the جمع کارکرد روزانه column into written_total exactly as written (e.g. '9:30', '8'). Do not
+  compute anything yourself. Ignore monthly totals written outside the table.
 - If a value is crossed out and a correction is written nearby (also below the table), use the correction
   for that row and mention it in note.
+- Some people write Persian digits, others Latin digits. Look closely at each digit: Persian ۸ is an
+  inverted V and ۶ has a tail; in Latin handwriting 8 has two loops and 6 one loop. Typical exit times
+  are in the afternoon/evening, but read what is written, do not guess.
+- Read each row strictly along its own horizontal line; never copy a value from the row above or below.
 - List any field you are not sure about in uncertain_fields (use the schema field names).
 """
 
+MULTI_PAGE = """
+There are {n} page images below, each preceded by its label 'Page N'. Return exactly {n} entries in
+`pages`, in the same order, one per image, even if a page looks like a duplicate or is mostly empty.
+"""
 
-def render_pages(pdf_path: str, dpi: int = 200) -> list[bytes]:
+
+MAX_REQUEST_BYTES = 18 * 1024 * 1024  # Gemini inline request limit is 20 MB
+
+
+class Document(BaseModel):
+    pages: list[PageData] = Field(description="One entry per input page, in the same order")
+
+
+def table_rect(page: pymupdf.Page) -> pymupdf.Rect:
+    """Bounding box of the ruled table (found from its long border lines), padded so the year
+    printed above it and notes written next to or below it stay in view. Falls back to the whole page."""
+    pix = page.get_pixmap(dpi=50, colorspace=pymupdf.csGRAY)
+    img = np.frombuffer(pix.samples, np.uint8).reshape(pix.h, pix.stride)[:, : pix.w]
+    dark = img < 110
+    rows = np.flatnonzero(dark.mean(axis=1) > 0.4)
+    if len(rows) < 2:
+        return page.rect
+    cols = np.flatnonzero(dark[rows[0] : rows[-1] + 1].mean(axis=0) > 0.4)
+    if len(cols) < 2:
+        return page.rect
+    sx, sy = page.rect.width / pix.w, page.rect.height / pix.h
+    w, h = page.rect.width, page.rect.height
+    rect = pymupdf.Rect(cols[0] * sx - 0.06 * w, rows[0] * sy - 0.10 * h,
+                        cols[-1] * sx + 0.06 * w, rows[-1] * sy + 0.10 * h)
+    return rect & page.rect
+
+
+def render_pages(pdf_path: str, dpi: int = 300) -> list[bytes]:
+    """Render each page's table as JPEG, lowering resolution until all fit in one request."""
     doc = pymupdf.open(pdf_path)
     try:
-        return [page.get_pixmap(dpi=dpi).tobytes("jpeg", jpg_quality=85) for page in doc]
+        clips = [table_rect(page) for page in doc]
+        for d, quality in ((dpi, 85), (220, 80), (150, 75)):
+            images = [page.get_pixmap(dpi=d, clip=clip).tobytes("jpeg", jpg_quality=quality)
+                      for page, clip in zip(doc, clips)]
+            if sum(len(i) for i in images) <= MAX_REQUEST_BYTES:
+                break
+        return images
     finally:
         doc.close()
 
@@ -71,25 +118,29 @@ def make_client() -> genai.Client:
     return genai.Client(api_key=key)
 
 
-def extract_page(client: genai.Client, image: bytes, model: str, retries: int = 5) -> PageData:
+def extract_images(client: genai.Client, images: list[bytes], model: str, retries: int = 4) -> list[PageData]:
+    """All pages in a single request."""
     config = types.GenerateContentConfig(
         response_mime_type="application/json",
-        response_schema=PageData,
+        response_schema=Document,
         temperature=0,
+        max_output_tokens=65536,
+        media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
     )
-    contents = [types.Part.from_bytes(data=image, mime_type="image/jpeg"), PROMPT]
-    delay = 10.0
+    contents: list = [PROMPT + MULTI_PAGE.format(n=len(images))]
+    for i, image in enumerate(images, start=1):
+        contents += [f"Page {i}:", types.Part.from_bytes(data=image, mime_type="image/jpeg")]
+    delay = 15.0
     for attempt in range(retries):
         try:
             resp = client.models.generate_content(model=model, contents=contents, config=config)
-            if resp.parsed is not None:
-                return resp.parsed
-            return PageData.model_validate_json(resp.text)
+            doc = resp.parsed if resp.parsed is not None else Document.model_validate_json(resp.text)
+            return doc.pages
         except Exception as e:  # rate limits / transient server errors
-            if attempt == retries - 1:
-                raise
             msg = str(e)
-            if not any(code in msg for code in ("429", "500", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE")):
+            if attempt == retries - 1 or not any(
+                code in msg for code in ("429", "500", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE")
+            ):
                 raise
             time.sleep(delay)
             delay *= 2
@@ -99,16 +150,14 @@ def extract_page(client: genai.Client, image: bytes, model: str, retries: int = 
 def extract_pdf(
     pdf_path: str,
     model: str | None = None,
-    progress: Callable[[int, int], None] | None = None,
+    status: Callable[[str], None] | None = None,
 ) -> list[PageData]:
     model = model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
     client = make_client()
     images = render_pages(pdf_path)
-    pages = []
-    for i, image in enumerate(images):
-        if progress:
-            progress(i, len(images))
-        pages.append(extract_page(client, image, model))
-    if progress:
-        progress(len(images), len(images))
+    if status:
+        status(f"sending {len(images)} pages to {model} in one request")
+    pages = extract_images(client, images, model)
+    if len(pages) != len(images):
+        raise RuntimeError(f"model returned {len(pages)} pages for {len(images)} input pages")
     return pages

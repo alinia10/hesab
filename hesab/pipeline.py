@@ -15,9 +15,9 @@ load_dotenv()
 def convert(
     pdf_path: str,
     model: str | None = None,
-    progress: Callable[[int, int], None] | None = None,
+    status: Callable[[str], None] | None = None,
 ) -> tuple[bytes, Month, list[PageData]]:
-    pages = extract_pdf(pdf_path, model=model, progress=progress)
+    pages = extract_pdf(pdf_path, model=model, status=status)
     month = build_month(pages)
     return write_workbook(month), month, pages
 

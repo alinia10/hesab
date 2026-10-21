@@ -25,10 +25,14 @@ def friendly_error(e: Exception) -> str:
         return "کلید Gemini تنظیم نشده است. کلید را در فایل ‎.env‎ با نام GEMINI_API_KEY قرار دهید."
     if "API_KEY_INVALID" in msg or "API key not valid" in msg:
         return "کلید Gemini نامعتبر است. کلید را در فایل ‎.env‎ بررسی کنید."
+    if "503" in msg or "UNAVAILABLE" in msg:
+        return "سرور Gemini در حال حاضر شلوغ است. چند دقیقه بعد دوباره امتحان کنید."
     if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
         return "سهمیه رایگان Gemini موقتاً تمام شده است. چند دقیقه بعد دوباره امتحان کنید."
     if "no dated rows" in msg:
         return "هیچ جدول حضور و غیابی در این فایل پیدا نشد."
+    if "input pages" in msg or "MAX_TOKENS" in msg:
+        return "پاسخ هوش مصنوعی ناقص بود. لطفاً دوباره امتحان کنید."
     return f"خطا در پردازش فایل: {msg}"
 
 
@@ -128,22 +132,15 @@ st.markdown(
 uploaded = st.file_uploader("فایل PDF", type="pdf", label_visibility="collapsed")
 
 if uploaded and st.button("تبدیل به اکسل", type="primary"):
-    bar = st.progress(0.0, text="در حال آماده‌سازی ...")
-    with tempfile.TemporaryDirectory() as tmp:
+    with st.spinner("در حال خواندن همه‌ی صفحات در یک درخواست؛ ممکن است چند دقیقه طول بکشد ..."), \
+            tempfile.TemporaryDirectory() as tmp:
         pdf = Path(tmp) / "input.pdf"
         pdf.write_bytes(uploaded.getvalue())
         try:
-            data, month, pages = convert(
-                str(pdf),
-                progress=lambda i, n: bar.progress(
-                    i / n, text=f"در حال خواندن صفحه‌ی {fa(min(i + 1, n))} از {fa(n)} ..."
-                ),
-            )
+            data, month, pages = convert(str(pdf))
         except Exception as e:
-            bar.empty()
             st.error(friendly_error(e))
             st.stop()
-    bar.empty()
     st.session_state.result = (data, month, len(pages), uploaded.name)
 
 if "result" in st.session_state:

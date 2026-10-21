@@ -17,6 +17,7 @@ class Day:
     weekday: str | None = None
     times: dict[str, int | None] = field(default_factory=lambda: dict.fromkeys(TIME_FIELDS))
     remote: int | None = None  # minutes
+    written_total: int | None = None  # handwritten, cross-check only
     notes: list[str] = field(default_factory=list)
     flags: set[str] = field(default_factory=set)  # fields to highlight
     on_page: bool = False  # row was present in the scan
@@ -82,6 +83,8 @@ def _fill_row(d: Day, row) -> None:
             d.flags.add("remote")
         else:
             d.remote = v
+    if row.written_total and d.written_total is None:
+        d.written_total = parse_hours(row.written_total)
     if row.note:
         d.notes.append(row.note.strip())
     d.flags.update(f for f in row.uncertain_fields if f in TIME_FIELDS or f == "remote")
@@ -96,6 +99,10 @@ def _validate(d: Day) -> None:
         elif x is not None and y is not None and y <= x:
             d.flags.update({a, b})
             d.notes.append(f"{a}/{b}: خروج قبل از ورود (بعد از نیمه‌شب فرض شد)")
+    if d.written_total is not None and abs(d.written_total - d.total) > 15:
+        w, t = d.written_total, d.total
+        d.flags.add("total")
+        d.notes.append(f"جمع دست‌نویس {w // 60}:{w % 60:02d} با محاسبه {t // 60}:{t % 60:02d} فرق دارد")
     if d.total > 16 * 60:
         d.flags.add("total")
         d.notes.append("کارکرد بیش از ۱۶ ساعت")

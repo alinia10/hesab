@@ -23,11 +23,12 @@ def main() -> None:
     if src.suffix.lower() == ".json":
         data, month, pages = convert_json(str(src))
     else:
-        def progress(i: int, n: int) -> None:
-            print(f"\rreading page {min(i + 1, n)}/{n} ...", end="", file=sys.stderr, flush=True)
-
-        data, month, pages = convert(str(src), model=args.model, progress=progress)
-        print(file=sys.stderr)
+        try:
+            data, month, pages = convert(
+                str(src), model=args.model, status=lambda m: print(m, "...", file=sys.stderr, flush=True)
+            )
+        except Exception as e:
+            sys.exit(f"error: {e}")
         if args.save_json:
             dump_pages(pages, str(src.with_suffix(".json")))
 
