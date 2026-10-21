@@ -1,5 +1,6 @@
 """Streamlit UI: upload the monthly PDF, download the Excel. Fully Persian, RTL."""
 
+import html
 import tempfile
 from pathlib import Path
 
@@ -22,9 +23,9 @@ def hm(minutes: int) -> str:
 def friendly_error(e: Exception) -> str:
     msg = str(e)
     if "GEMINI_API_KEY" in msg:
-        return "کلید Gemini تنظیم نشده است. کلید را در فایل ‎.env‎ با نام GEMINI_API_KEY قرار دهید."
+        return "کلید Gemini تنظیم نشده است. کلید را در فایل <code>.env</code> با نام GEMINI_API_KEY قرار دهید."
     if "API_KEY_INVALID" in msg or "API key not valid" in msg:
-        return "کلید Gemini نامعتبر است. کلید را در فایل ‎.env‎ بررسی کنید."
+        return "کلید Gemini نامعتبر است. کلید را در فایل <code>.env</code> بررسی کنید."
     if "503" in msg or "UNAVAILABLE" in msg:
         return "سرور Gemini در حال حاضر شلوغ است. چند دقیقه بعد دوباره امتحان کنید."
     if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
@@ -33,7 +34,7 @@ def friendly_error(e: Exception) -> str:
         return "هیچ جدول حضور و غیابی در این فایل پیدا نشد."
     if "input pages" in msg or "MAX_TOKENS" in msg:
         return "پاسخ هوش مصنوعی ناقص بود. لطفاً دوباره امتحان کنید."
-    return f"خطا در پردازش فایل: {msg}"
+    return f"خطا در پردازش فایل: <code>{html.escape(msg)}</code>"
 
 
 CSS = """
@@ -74,12 +75,19 @@ header[data-testid="stHeader"], [data-testid="stToolbar"], footer { display: non
   content: "فایل PDF فرم‌های اسکن‌شده را اینجا رها کنید";
   color: #44506a; font-weight: 500; margin-left: auto;
 }
-[data-testid="stFileUploaderDropzone"] button { font-size: 0 !important; }
-[data-testid="stFileUploaderDropzone"] button * { font-size: 0 !important; }
-[data-testid="stFileUploaderDropzone"] button::after {
+[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"] {
+  font-size: 0 !important; white-space: nowrap; min-width: 110px;
+}
+[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"] * { font-size: 0 !important; }
+[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"]::after {
   content: "انتخاب فایل"; font-size: .95rem; font-weight: 500;
 }
-[data-testid="stFileUploaderFile"] { direction: rtl; }
+/* after a file is chosen: label the chip, keep the file name LTR, hide the extra "add" button */
+[data-testid="stFileUploaderDropzone"]:has([data-testid="stFileChips"])::before { content: "فایل انتخاب‌شده:"; }
+[data-testid="stFileChips"] { direction: rtl; }
+[data-testid="stFileChips"] > button { display: none !important; }
+[data-testid="stFileChip"] { direction: rtl; gap: 8px; }
+[data-testid="stFileChipName"], [data-testid="stFileChip"] > div > div { direction: ltr; unicode-bidi: isolate; text-align: right; }
 
 [data-testid="stElementContainer"]:has([data-testid="stButton"]),
 [data-testid="stElementContainer"]:has([data-testid="stDownloadButton"]),
@@ -87,6 +95,8 @@ header[data-testid="stHeader"], [data-testid="stToolbar"], footer { display: non
 [data-testid="stButton"] button, [data-testid="stDownloadButton"] button {
   width: 100%; border-radius: 12px; padding: .7rem 1rem; font-weight: 700; font-size: 1.05rem;
 }
+[data-testid="stButton"] button p, [data-testid="stDownloadButton"] button p { font-size: inherit; font-weight: inherit; }
+[data-testid="stSpinner"], [data-testid="stSpinner"] > div { direction: rtl; flex-direction: row; justify-content: flex-start; gap: 10px; }
 
 .cards { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0 18px; }
 .card {
@@ -106,7 +116,9 @@ table.people td.num { text-align: center; }
 .ok { color: #2e7d32; }
 
 .note { color: #6b7690; font-size: .85rem; line-height: 1.9; margin-top: 8px; }
-[data-testid="stAlert"] { direction: rtl; text-align: right; }
+.err { direction: rtl; text-align: right; background: #fdecee; color: #a61b2b; border: 1px solid #f5c2c7; border-radius: 12px;
+  padding: 14px 18px; line-height: 1.9; margin-top: 8px; }
+.err code { direction: ltr; unicode-bidi: isolate; background: transparent; color: inherit; padding: 0; font-size: inherit; font-family: inherit !important; }
 </style>
 """
 
@@ -136,11 +148,14 @@ if uploaded and st.button("تبدیل به اکسل", type="primary"):
             tempfile.TemporaryDirectory() as tmp:
         pdf = Path(tmp) / "input.pdf"
         pdf.write_bytes(uploaded.getvalue())
+        error = None
         try:
             data, month, pages = convert(str(pdf))
         except Exception as e:
-            st.error(friendly_error(e))
-            st.stop()
+            error = friendly_error(e)
+    if error:
+        st.markdown(f'<div class="err">{error}</div>', unsafe_allow_html=True)
+        st.stop()
     st.session_state.result = (data, month, len(pages), uploaded.name)
 
 if "result" in st.session_state:

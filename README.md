@@ -13,7 +13,19 @@ One shot: scanned monthly attendance PDF (فرم حضور و غیاب کارکن
   including days where the handwritten total differs from the computed one by more than 15 minutes (a sign of a misread time).
   Always check yellow cells against the paper.
 
-## Setup
+## Windows (double-click)
+
+1. Get the project folder onto the PC: on GitHub, **Code → Download ZIP**, then unzip it (for example to `C:\hesab`).
+2. Double-click **`start-web.bat`**.
+   - The first time, it installs `uv` and asks for your Gemini API key (paste it and press Enter).
+     It then downloads Python and the libraries, which takes a few minutes, only once.
+   - The page opens in the browser at http://localhost:8501. Keep the black window open while you use it,
+     and close it when you're done.
+3. Or drag a PDF onto **`convert.bat`**: the Excel file is written next to the PDF and opened.
+
+Tip: right-click `start-web.bat` → *Send to* → *Desktop (create shortcut)* for a desktop icon.
+
+## Setup (Linux / macOS)
 
 ```sh
 uv sync
@@ -38,7 +50,7 @@ uv run streamlit run hesab/web.py
 
 ## Notes
 
-- Default model is `gemini-2.5-flash`. Override it with `GEMINI_MODEL` or `--model`.
+- Default model is `gemini-3.8-flash`. Override it with `GEMINI_MODEL` or `--model`.
 - One PDF = one API request, which matters on the free tier. The request takes a few minutes.
   On `429`/`503` (quota or Google overload) it retries with backoff.
 - Scans and generated spreadsheets are git-ignored because they contain personal data.

@@ -13,7 +13,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(prog="hesab", description="Attendance PDF -> Excel")
     ap.add_argument("input", help="scanned PDF (or a .json saved with --save-json)")
     ap.add_argument("-o", "--output", help="output .xlsx (default: next to the input)")
-    ap.add_argument("--model", help="Gemini model (default: $GEMINI_MODEL or gemini-2.5-flash)")
+    ap.add_argument("--model", help="Gemini model (default: $GEMINI_MODEL or gemini-3.8-flash)")
     ap.add_argument("--save-json", action="store_true", help="also save the raw extraction as .json")
     args = ap.parse_args()
 
