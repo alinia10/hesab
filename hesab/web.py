@@ -1,206 +1,275 @@
-"""Streamlit UI: upload the monthly PDF, download the Excel. Fully Persian, RTL."""
+"""Local web UI: one RTL Persian page with a title and an upload box. PDF in -> Excel out."""
 
-import html
+import argparse
+import json
 import tempfile
+import threading
+import uuid
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote, unquote
 
-import streamlit as st
+from .pipeline import convert
 
-from hesab.excel import MONTHS
-from hesab.pipeline import convert
+MAX_UPLOAD = 100 * 1024 * 1024
+LTR = "⁦{}⁩"  # isolate Latin text inside Persian sentences
 
-FA_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
-
-
-def fa(x) -> str:
-    return str(x).translate(FA_DIGITS)
-
-
-def hm(minutes: int) -> str:
-    return fa(f"{minutes // 60}:{minutes % 60:02d}")
+JOBS: dict[str, dict] = {}
+JOBS_LOCK = threading.Lock()
 
 
 def friendly_error(e: Exception) -> str:
     msg = str(e)
     if "GEMINI_API_KEY" in msg:
-        return "کلید Gemini تنظیم نشده است. کلید را در فایل <code>.env</code> با نام GEMINI_API_KEY قرار دهید."
+        return f"کلید Gemini تنظیم نشده است. کلید را در فایل {LTR.format('.env')} قرار دهید."
     if "API_KEY_INVALID" in msg or "API key not valid" in msg:
-        return "کلید Gemini نامعتبر است. کلید را در فایل <code>.env</code> بررسی کنید."
+        return f"کلید Gemini نامعتبر است. کلید را در فایل {LTR.format('.env')} بررسی کنید."
     if "503" in msg or "UNAVAILABLE" in msg:
         return "سرور Gemini در حال حاضر شلوغ است. چند دقیقه بعد دوباره امتحان کنید."
     if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
-        return "سهمیه رایگان Gemini موقتاً تمام شده است. چند دقیقه بعد دوباره امتحان کنید."
+        return "سهمیه رایگان Gemini موقتاً تمام شده است. کمی بعد دوباره امتحان کنید."
     if "no dated rows" in msg:
         return "هیچ جدول حضور و غیابی در این فایل پیدا نشد."
     if "input pages" in msg or "MAX_TOKENS" in msg:
-        return "پاسخ هوش مصنوعی ناقص بود. لطفاً دوباره امتحان کنید."
-    return f"خطا در پردازش فایل: <code>{html.escape(msg)}</code>"
+        return "پاسخ هوش مصنوعی ناقص بود. دوباره امتحان کنید."
+    return "خطا در تبدیل فایل: " + LTR.format(msg[:300])
 
 
-CSS = """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;700;800&display=swap');
-
-html, body, .stApp, .stApp :not([data-testid="stIconMaterial"]):not(code) {
-  font-family: 'Vazirmatn', Tahoma, sans-serif !important;
-}
-.stApp { direction: rtl; text-align: right; background: #f6f7fb; }
-[data-testid="stMainBlockContainer"] { max-width: 760px; padding-top: 2.5rem; }
-header[data-testid="stHeader"], [data-testid="stToolbar"], footer { display: none !important; }
-
-.hero {
-  background: linear-gradient(135deg, #1f4e79 0%, #2e75b6 100%);
-  color: #fff; border-radius: 18px; padding: 28px 30px; margin-bottom: 22px;
-  box-shadow: 0 10px 30px rgba(31, 78, 121, .18);
-}
-.hero h1 { color: #fff !important; font-size: 1.7rem; font-weight: 800; margin: 0 0 6px !important; padding: 0 !important; }
-.hero h1 > div, .hero h1 span { margin: 0 !important; padding: 0 !important; }
-[data-testid="stHeaderActionElements"], .hero h1 a { display: none !important; }
-.hero p { color: #dbe8f5; margin: 0; font-size: 1rem; line-height: 1.9; }
-
-.steps { display: flex; gap: 10px; margin: 0 0 18px; flex-wrap: wrap; }
-.step {
-  flex: 1 1 150px; background: #fff; border: 1px solid #e3e7ef; border-radius: 12px;
-  padding: 12px 14px; font-size: .9rem; color: #44506a;
-}
-.step b { display: block; color: #1f4e79; font-size: 1.05rem; margin-bottom: 2px; }
-
-/* file uploader: replace built-in English text */
-[data-testid="stFileUploader"] label { display: none; }
-[data-testid="stFileUploaderDropzone"] {
-  direction: rtl; background: #fff; border: 2px dashed #9db8d6; border-radius: 14px; padding: 26px;
-}
-[data-testid="stFileUploaderDropzoneInstructions"] { display: none !important; }
-[data-testid="stFileUploaderDropzone"]::before {
-  content: "فایل PDF فرم‌های اسکن‌شده را اینجا رها کنید";
-  color: #44506a; font-weight: 500; margin-left: auto;
-}
-[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"] {
-  font-size: 0 !important; white-space: nowrap; min-width: 110px;
-}
-[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"] * { font-size: 0 !important; }
-[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"]::after {
-  content: "انتخاب فایل"; font-size: .95rem; font-weight: 500;
-}
-/* after a file is chosen: label the chip, keep the file name LTR, hide the extra "add" button */
-[data-testid="stFileUploaderDropzone"]:has([data-testid="stFileChips"])::before { content: "فایل انتخاب‌شده:"; }
-[data-testid="stFileChips"] { direction: rtl; }
-[data-testid="stFileChips"] > button { display: none !important; }
-[data-testid="stFileChip"] { direction: rtl; gap: 8px; }
-[data-testid="stFileChipName"], [data-testid="stFileChip"] > div > div { direction: ltr; unicode-bidi: isolate; text-align: right; }
-
-[data-testid="stElementContainer"]:has([data-testid="stButton"]),
-[data-testid="stElementContainer"]:has([data-testid="stDownloadButton"]),
-[data-testid="stButton"], [data-testid="stDownloadButton"],
-[data-testid="stButton"] button, [data-testid="stDownloadButton"] button {
-  width: 100%; border-radius: 12px; padding: .7rem 1rem; font-weight: 700; font-size: 1.05rem;
-}
-[data-testid="stButton"] button p, [data-testid="stDownloadButton"] button p { font-size: inherit; font-weight: inherit; }
-[data-testid="stSpinner"], [data-testid="stSpinner"] > div { direction: rtl; flex-direction: row; justify-content: flex-start; gap: 10px; }
-
-.cards { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0 18px; }
-.card {
-  flex: 1 1 130px; background: #fff; border: 1px solid #e3e7ef; border-radius: 14px; padding: 14px 16px;
-  text-align: center;
-}
-.card .v { font-size: 1.6rem; font-weight: 800; color: #1f4e79; }
-.card .l { font-size: .85rem; color: #6b7690; }
-.card.warn .v { color: #b7791f; }
-
-table.people { width: 100%; border-collapse: separate; border-spacing: 0; background: #fff;
-  border: 1px solid #e3e7ef; border-radius: 14px; overflow: hidden; margin-bottom: 18px; }
-table.people th { background: #dde4ee; color: #1f3550; font-weight: 700; padding: 10px; text-align: right; }
-table.people td { padding: 10px; border-top: 1px solid #eef1f6; color: #2b3445; }
-table.people td.num { text-align: center; }
-.badge { white-space: nowrap; background: #fff2a8; color: #7a5a00; border-radius: 8px; padding: 2px 10px; font-size: .85rem; }
-.ok { color: #2e7d32; }
-
-.note { color: #6b7690; font-size: .85rem; line-height: 1.9; margin-top: 8px; }
-.err { direction: rtl; text-align: right; background: #fdecee; color: #a61b2b; border: 1px solid #f5c2c7; border-radius: 12px;
-  padding: 14px 18px; line-height: 1.9; margin-top: 8px; }
-.err code { direction: ltr; unicode-bidi: isolate; background: transparent; color: inherit; padding: 0; font-size: inherit; font-family: inherit !important; }
-</style>
-"""
-
-st.set_page_config(page_title="حضور و غیاب به اکسل", page_icon="📊", layout="centered")
-st.markdown(CSS, unsafe_allow_html=True)
-
-st.markdown(
-    """
-<div class="hero">
-  <h1>تبدیل فرم حضور و غیاب به اکسل</h1>
-  <p>فایل PDF اسکن‌شده‌ی ماه را بدهید و یک فایل اکسل کامل تحویل بگیرید:
-  هر نفر در یک برگه، همراه با برگه‌ی خلاصه و محاسبه‌ی خودکار کارکرد روزانه.</p>
-</div>
-<div class="steps">
-  <div class="step"><b>۱. بارگذاری</b>فایل PDF فرم‌ها را انتخاب کنید</div>
-  <div class="step"><b>۲. تبدیل</b>صفحات با هوش مصنوعی خوانده می‌شوند</div>
-  <div class="step"><b>۳. دریافت</b>فایل اکسل را دانلود و خانه‌های زرد را بررسی کنید</div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-uploaded = st.file_uploader("فایل PDF", type="pdf", label_visibility="collapsed")
-
-if uploaded and st.button("تبدیل به اکسل", type="primary"):
-    with st.spinner("در حال خواندن همه‌ی صفحات در یک درخواست؛ ممکن است چند دقیقه طول بکشد ..."), \
-            tempfile.TemporaryDirectory() as tmp:
-        pdf = Path(tmp) / "input.pdf"
-        pdf.write_bytes(uploaded.getvalue())
-        error = None
+def run_job(job_id: str, pdf: bytes) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "input.pdf"
+        path.write_bytes(pdf)
         try:
-            data, month, pages = convert(str(pdf))
+            data, _, _ = convert(str(path))
+            result = {"state": "done", "data": data}
         except Exception as e:
-            error = friendly_error(e)
-    if error:
-        st.markdown(f'<div class="err">{error}</div>', unsafe_allow_html=True)
-        st.stop()
-    st.session_state.result = (data, month, len(pages), uploaded.name)
+            result = {"state": "error", "message": friendly_error(e)}
+    with JOBS_LOCK:
+        JOBS[job_id].update(result)
 
-if "result" in st.session_state:
-    data, month, n_pages, name = st.session_state.result
-    flagged_total = sum(1 for p in month.people for d in p.days if d.flags)
-    period = f"{MONTHS[month.month - 1]} {fa(month.year or '')}".strip()
 
-    st.markdown(
-        f"""
-<div class="cards">
-  <div class="card"><div class="v">{fa(n_pages)}</div><div class="l">صفحه</div></div>
-  <div class="card"><div class="v">{fa(len(month.people))}</div><div class="l">نفر</div></div>
-  <div class="card"><div class="v">{period}</div><div class="l">ماه</div></div>
-  <div class="card{' warn' if flagged_total else ''}"><div class="v">{fa(flagged_total)}</div>
-    <div class="l">ردیف نیازمند بررسی</div></div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):  # keep the console quiet
+        pass
 
-    rows = []
-    for p in month.people:
-        worked = sum(1 for d in p.days if d.total > 0)
-        flagged = sum(1 for d in p.days if d.flags)
-        check = f'<span class="badge">{fa(flagged)} ردیف</span>' if flagged else '<span class="ok">✓</span>'
-        rows.append(
-            f"<tr><td>{p.name}</td><td class='num'>{fa(worked)}</td>"
-            f"<td class='num'>{hm(sum(d.total for d in p.days))}</td><td class='num'>{check}</td></tr>"
-        )
-    st.markdown(
-        "<table class='people'><tr><th>نام و نام خانوادگی</th><th>روزهای کاری</th>"
-        "<th>جمع ساعت</th><th>بررسی</th></tr>" + "".join(rows) + "</table>",
-        unsafe_allow_html=True,
-    )
+    def send_json(self, obj: dict, status: int = 200) -> None:
+        body = json.dumps(obj, ensure_ascii=False).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
-    st.download_button(
-        "دانلود فایل اکسل",
-        data,
-        file_name=Path(name).with_suffix(".xlsx").name,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary",
-    )
-    st.markdown(
-        '<p class="note">خانه‌های <b>زرد</b> در اکسل مقادیری هستند که با اطمینان خوانده نشده‌اند یا با هم '
-        "جور درنمی‌آیند؛ آن‌ها را با برگه‌ی اصلی مقایسه کنید. با اصلاح هر ساعت در اکسل، جمع روزانه و ماهانه "
-        "خودکار به‌روز می‌شود.</p>",
-        unsafe_allow_html=True,
-    )
+    def do_GET(self):
+        if self.path in ("/", "/index.html"):
+            body = PAGE.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        kind, _, job_id = self.path.strip("/").partition("/")
+        with JOBS_LOCK:
+            job = dict(JOBS.get(job_id, {}))
+        if not job:
+            self.send_json({"state": "error", "message": "این درخواست پیدا نشد. فایل را دوباره انتخاب کنید."}, 404)
+        elif kind == "status":
+            self.send_json({k: v for k, v in job.items() if k in ("state", "message")})
+        elif kind == "download" and job["state"] == "done":
+            name = Path(job["name"]).stem + ".xlsx"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            self.send_header("Content-Disposition", f"attachment; filename=\"hesab.xlsx\"; filename*=UTF-8''{quote(name)}")
+            self.send_header("Content-Length", str(len(job["data"])))
+            self.end_headers()
+            self.wfile.write(job["data"])
+        else:
+            self.send_error(404)
+
+    def do_POST(self):
+        if self.path != "/convert":
+            self.send_error(404)
+            return
+        size = int(self.headers.get("Content-Length") or 0)
+        if not 0 < size <= MAX_UPLOAD:
+            self.send_json({"message": "حجم فایل مجاز نیست."}, 400)
+            return
+        pdf = self.rfile.read(size)
+        if not pdf.startswith(b"%PDF"):
+            self.send_json({"message": "فقط فایل PDF قابل قبول است."}, 400)
+            return
+        job_id = uuid.uuid4().hex
+        with JOBS_LOCK:
+            JOBS[job_id] = {"state": "running", "name": unquote(self.headers.get("X-Filename") or "hesab.pdf")}
+        threading.Thread(target=run_job, args=(job_id, pdf), daemon=True).start()
+        self.send_json({"id": job_id})
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(prog="hesab-web", description="Attendance PDF -> Excel, in the browser")
+    ap.add_argument("--port", type=int, default=8501)
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--no-browser", action="store_true", help="do not open the browser")
+    args = ap.parse_args()
+
+    for port in range(args.port, args.port + 20):  # next free port if this one is taken
+        try:
+            server = ThreadingHTTPServer((args.host, port), Handler)
+            break
+        except OSError:
+            continue
+    else:
+        raise SystemExit(f"no free port from {args.port}")
+    server.daemon_threads = True
+    url = f"http://localhost:{port}"
+    print(f"hesab is running at {url}  (close this window or press Ctrl+C to stop)", flush=True)
+    if not args.no_browser:
+        threading.Timer(0.5, webbrowser.open, [url]).start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+PAGE = """<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>تبدیل حضور و غیاب به اکسل</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f3f5f9; --card: #ffffff; --ink: #1d2939; --muted: #667085; --line: #c9d4e3;
+    --brand: #1f4e79; --brand-soft: #eaf1f8; --ok: #1e7a46; --err: #b42318;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    font-family: Vazirmatn, Tahoma, sans-serif; background: var(--bg); color: var(--ink);
+    min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px 16px;
+  }
+  main { width: 100%; max-width: 560px; }
+  h1 { margin: 0 0 24px; text-align: center; font-size: 1.7rem; font-weight: 800; color: var(--brand); }
+  #drop {
+    background: var(--card); border: 2px dashed var(--line); border-radius: 20px;
+    min-height: 280px; padding: 40px 24px; cursor: pointer; outline: none;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+    text-align: center; transition: border-color .15s, background-color .15s;
+  }
+  #drop:hover, #drop:focus-visible, #drop.over { border-color: var(--brand); background: var(--brand-soft); }
+  #drop.busy { cursor: progress; border-style: solid; background: var(--card); }
+  .icon { width: 56px; height: 56px; color: var(--brand); }
+  .icon.ok { color: var(--ok); }
+  .icon.err { color: var(--err); }
+  .label { font-size: 1.1rem; font-weight: 500; }
+  .label.err { color: var(--err); line-height: 1.9; }
+  .file {
+    max-width: 100%; color: var(--muted); font-size: .9rem; direction: ltr; unicode-bidi: isolate;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .clock { color: var(--muted); font-size: .95rem; }
+  .spinner {
+    width: 48px; height: 48px; border-radius: 50%;
+    border: 4px solid var(--brand-soft); border-top-color: var(--brand); animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .btn {
+    font: inherit; font-weight: 700; color: #fff; background: var(--brand); border: 0; border-radius: 12px;
+    padding: 12px 32px; text-decoration: none; cursor: pointer;
+  }
+  .btn:hover { filter: brightness(1.12); }
+  .link { font: inherit; font-size: .9rem; color: var(--brand); background: none; border: 0; cursor: pointer; text-decoration: underline; }
+</style>
+</head>
+<body>
+<main>
+  <h1>تبدیل حضور و غیاب به اکسل</h1>
+  <div id="drop" tabindex="0" role="button" aria-label="انتخاب فایل PDF"></div>
+  <input id="pick" type="file" accept="application/pdf,.pdf" hidden>
+</main>
+<script>
+const drop = document.getElementById('drop');
+const pick = document.getElementById('pick');
+const fa = s => String(s).replace(/[0-9]/g, d => '۰۱۲۳۴۵۶۷۸۹'[d]);
+const esc = s => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
+const svg = (cls, path) => `<svg class="icon ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+  stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
+const ICON_UP = svg('', '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M12 17v-6"/><path d="m9.5 13.5 2.5-2.5 2.5 2.5"/>');
+const ICON_OK = svg('ok', '<circle cx="12" cy="12" r="9"/><path d="m8 12.5 2.8 2.8L16.5 9.5"/>');
+const ICON_ERR = svg('err', '<circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5"/><path d="M12 16.5h.01"/>');
+let busy = false, timer = null;
+
+function show(html, isBusy) {
+  busy = isBusy;
+  drop.classList.toggle('busy', isBusy);
+  drop.innerHTML = html;
+}
+function idle() {
+  show(`${ICON_UP}<div class="label">فایل PDF را اینجا بکشید یا کلیک کنید</div>`, false);
+}
+function fail(message, name) {
+  clearInterval(timer);
+  show(`${ICON_ERR}<div class="label err">${esc(message)}</div>` +
+       (name ? `<div class="file">${esc(name)}</div>` : '') +
+       `<button class="link" type="button">انتخاب دوباره</button>`, false);
+}
+function done(id, name) {
+  clearInterval(timer);
+  const xlsx = name.replace(/\\.pdf$/i, '') + '.xlsx';
+  const url = '/download/' + id;
+  show(`${ICON_OK}<div class="label">فایل اکسل آماده است</div><div class="file">${esc(xlsx)}</div>` +
+       `<a class="btn" href="${url}" download>دانلود اکسل</a>` +
+       `<button class="link" type="button" data-again>تبدیل فایل دیگر</button>`, false);
+  drop.querySelector('a').click();
+}
+
+class AppError extends Error {}
+async function start(file) {
+  if (!/\\.pdf$/i.test(file.name) && file.type !== 'application/pdf') return fail('فقط فایل PDF قابل قبول است.', file.name);
+  const t0 = Date.now();
+  show(`<div class="spinner"></div><div class="label">در حال تبدیل ...</div>` +
+       `<div class="file">${esc(file.name)}</div><div class="clock" id="clock">۰:۰۰</div>`, true);
+  timer = setInterval(() => {
+    const s = Math.floor((Date.now() - t0) / 1000);
+    document.getElementById('clock').textContent = fa(Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'));
+  }, 1000);
+  try {
+    const r = await fetch('/convert', { method: 'POST', headers: { 'X-Filename': encodeURIComponent(file.name) }, body: file });
+    const job = await r.json();
+    if (!r.ok) throw new AppError(job.message);
+    for (;;) {
+      await new Promise(res => setTimeout(res, 2000));
+      const st = await (await fetch('/status/' + job.id, { cache: 'no-store' })).json();
+      if (st.state === 'done') return done(job.id, file.name);
+      if (st.state === 'error') throw new AppError(st.message);
+    }
+  } catch (e) {
+    fail(e instanceof AppError ? e.message : 'ارتباط با برنامه قطع شد. پنجره‌ی برنامه را دوباره باز کنید.', file.name);
+  }
+}
+
+drop.addEventListener('click', e => {
+  if (busy || e.target.closest('a')) return;
+  if (e.target.closest('[data-again]')) return idle();
+  pick.click();
+});
+drop.addEventListener('keydown', e => {
+  if (!busy && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); pick.click(); }
+});
+['dragenter', 'dragover'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); if (!busy) drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', e => { if (!busy && e.dataTransfer.files.length) start(e.dataTransfer.files[0]); });
+pick.addEventListener('change', () => { if (pick.files.length) start(pick.files[0]); pick.value = ''; });
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('drop', e => e.preventDefault());
+idle();
+</script>
+</body>
+</html>
+"""

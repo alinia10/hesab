@@ -6,11 +6,10 @@ call windows\setup.bat || goto fail
 
 echo.
 echo Starting... the first run downloads Python and libraries and can take a few minutes.
-echo The page opens in your browser at http://localhost:8501
+echo The page opens in your browser.
 echo Keep this window open while you use the page. Close it to stop.
 echo.
-start "" /b cmd /c "timeout /t 8 /nobreak >nul & start http://localhost:8501"
-uv run streamlit run hesab\web.py
+uv run hesab-web
 if errorlevel 1 goto fail
 exit /b 0
 

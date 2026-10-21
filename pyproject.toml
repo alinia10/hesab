@@ -11,11 +11,11 @@ dependencies = [
     "openpyxl>=3.1",
     "pydantic>=2.0",
     "python-dotenv>=1.0",
-    "streamlit>=1.30",
 ]
 
 [project.scripts]
 hesab = "hesab.cli:main"
+hesab-web = "hesab.web:main"
 
 [build-system]
 requires = ["hatchling"]

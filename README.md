@@ -42,10 +42,10 @@ uv run hesab scans.pdf -o mehr.xlsx --save-json   # also keep raw extraction (sc
 uv run hesab scans.json                # rebuild the Excel from a saved extraction, no API calls
 ```
 
-Web UI (drag-and-drop, download button):
+Web page (title + upload box; drop the PDF and the Excel downloads when ready):
 
 ```sh
-uv run streamlit run hesab/web.py
+uv run hesab-web        # opens http://localhost:8501 in the browser
 ```
 
 ## Notes
